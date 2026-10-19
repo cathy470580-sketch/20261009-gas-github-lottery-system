@@ -15,7 +15,9 @@
   const STORAGE_KEYS = {
     API_URL: 'lottery_gas_api_url',
     WINNERS: 'lottery_winners_history',
-    DATA_CACHE: 'lottery_cached_data'
+    DATA_CACHE: 'lottery_cached_data',
+    WEIGHTS: 'lottery_weights',
+    CLAIMS: 'lottery_claims'
   };
 
   // 內建展示示範資料（大學校園活動抽獎示範）
@@ -51,6 +53,8 @@
     prizes: [],
     participants: [],
     currentPrizeId: null,
+    weights: {},
+    claims: {},
     winners: [], // 格式: [{ winnerId, name, department, prizeId, prizeName, timestamp }]
     isRolling: false,
     rollIntervalId: null
@@ -103,7 +107,14 @@
 
       winnersListContainer: document.getElementById('winners-list-container'),
       btnExportCsv: document.getElementById('btn-export-csv'),
-      btnResetLottery: document.getElementById('btn-reset-lottery')
+      btnResetLottery: document.getElementById('btn-reset-lottery'),
+      searchName: document.getElementById('search-name'),
+      searchPrize: document.getElementById('search-prize'),
+      clearSearch: document.getElementById('clear-search'),
+      weightsList: document.getElementById('weights-list'),
+      saveWeights: document.getElementById('save-weights'),
+      adminToken: document.getElementById('admin-token'),
+      syncNote: document.getElementById('sync-note')
     };
   }
 
@@ -127,6 +138,11 @@
     dom.btnDraw.addEventListener('click', handleStartDraw);
     dom.btnExportCsv.addEventListener('click', exportWinnersToCsv);
     dom.btnResetLottery.addEventListener('click', handleResetLottery);
+    dom.searchName.addEventListener('input', renderWinnersList);
+    dom.searchPrize.addEventListener('change', renderWinnersList);
+    dom.clearSearch.addEventListener('click', () => { dom.searchName.value = ''; dom.searchPrize.value = ''; renderWinnersList(); });
+    dom.saveWeights.addEventListener('click', saveWeights);
+    dom.winnersListContainer.addEventListener('change', handleClaimChange);
   }
 
   /**
@@ -140,6 +156,8 @@
         dom.gasApiUrl.value = savedUrl;
       }
 
+      state.weights = JSON.parse(localStorage.getItem(STORAGE_KEYS.WEIGHTS) || '{}');
+      state.claims = JSON.parse(localStorage.getItem(STORAGE_KEYS.CLAIMS) || '{}');
       const savedWinners = localStorage.getItem(STORAGE_KEYS.WINNERS);
       if (savedWinners) {
         state.winners = JSON.parse(savedWinners);
@@ -202,6 +220,12 @@
       state.apiUrl = url;
       localStorage.setItem(STORAGE_KEYS.API_URL, url);
       loadData(json);
+      if (json.weights) state.weights = json.weights;
+      if (json.claims) state.claims = json.claims;
+      if (json.winners) state.winners = json.winners;
+      persistWinners();
+      renderWeights();
+      renderWinnersList();
       showStatusMessage(`連線成功！共載入 ${json.prizes.length} 項獎品與 ${json.participants.length} 位人員。`, 'success');
       dom.configPanel.classList.add('hidden');
     } catch (err) {
@@ -236,6 +260,7 @@
     }
 
     updateUI();
+    renderWeights();
   }
 
   /**
@@ -284,6 +309,7 @@
     renderPrizeOptions();
     updateStageAndStats();
     renderWinnersList();
+    renderWeights();
   }
 
   /**
@@ -401,14 +427,20 @@
    * 定格決定最終中獎人 (使用加密等級或均勻隨機)
    */
   function finalizeWinner(prize, eligiblePool) {
-    // 採用 crypto 均勻隨機抽取
-    let finalIndex = 0;
+    // 權重依「身分 ID」設定；同 ID 的重複報名保留多個抽獎機會。
+    const weights = eligiblePool.map(p => Number(state.weights[p.id] ?? 1));
+    const total = weights.reduce((sum, w) => sum + (Number.isFinite(w) && w > 0 ? w : 0), 0);
+    if (total <= 0) { state.isRolling = false; updateStageAndStats(); alert('所有候選人權重皆為 0'); return; }
+    let randomValue;
     if (window.crypto && window.crypto.getRandomValues) {
-      const randomBuffer = new Uint32Array(1);
-      window.crypto.getRandomValues(randomBuffer);
-      finalIndex = randomBuffer[0] % eligiblePool.length;
-    } else {
-      finalIndex = Math.floor(Math.random() * eligiblePool.length);
+      const bytes = new Uint32Array(2); window.crypto.getRandomValues(bytes);
+      randomValue = ((bytes[0] >>> 5) * 67108864 + (bytes[1] >>> 6)) / 9007199254740992;
+    } else randomValue = Math.random();
+    let threshold = randomValue * total;
+    let finalIndex = eligiblePool.length - 1;
+    for (let i = 0; i < weights.length; i++) {
+      threshold -= Math.max(0, weights[i]);
+      if (threshold < 0) { finalIndex = i; break; }
     }
 
     const winner = eligiblePool[finalIndex];
@@ -430,11 +462,13 @@
       email: winner.email || '',
       prizeId: prize.id,
       prizeName: prize.name,
-      timestamp: new Date().toLocaleString('zh-TW', { hour12: false })
+      timestamp: new Date().toLocaleString('zh-TW', { hour12: false }),
+      recordId: (window.crypto && window.crypto.randomUUID) ? window.crypto.randomUUID() : String(Date.now()) + '-' + Math.random().toString(36).slice(2)
     };
 
     state.winners.push(winnerRecord);
     persistWinners();
+    remoteWrite('addWinner', { winner: winnerRecord });
 
     state.isRolling = false;
     renderPrizeOptions();
@@ -465,7 +499,9 @@
 
     // 依獎品分組
     const grouped = {};
-    state.winners.forEach(w => {
+    const query = dom.searchName.value.trim().toLowerCase();
+    const selectedPrize = dom.searchPrize.value;
+    state.winners.filter(w => (!query || String(w.name).toLowerCase().includes(query)) && (!selectedPrize || w.prizeId === selectedPrize)).forEach(w => {
       if (!grouped[w.prizeId]) {
         grouped[w.prizeId] = {
           prizeName: w.prizeName,
@@ -475,6 +511,7 @@
       grouped[w.prizeId].items.push(w);
     });
 
+    if (!Object.keys(grouped).length) { dom.winnersListContainer.textContent = '查無符合條件的中獎紀錄'; return; }
     Object.keys(grouped).forEach(prizeId => {
       const group = grouped[prizeId];
       const groupEl = document.createElement('div');
@@ -482,7 +519,9 @@
 
       const titleEl = document.createElement('div');
       titleEl.className = 'group-title';
-      titleEl.innerHTML = `<span>${group.prizeName}</span><span>(${group.items.length} 位)</span>`;
+      const titleName = document.createElement('span'); titleName.textContent = group.prizeName;
+      const titleCount = document.createElement('span'); titleCount.textContent = `(${group.items.length} 位)`;
+      titleEl.append(titleName, titleCount);
       groupEl.appendChild(titleEl);
 
       const listEl = document.createElement('div');
@@ -492,13 +531,16 @@
         const itemEl = document.createElement('div');
         itemEl.className = 'winner-item';
         const metaParts = [item.department, item.grade, item.winnerId ? '#' + item.winnerId : ''].filter(Boolean).join(' · ');
-        itemEl.innerHTML = `
-          <div>
-            <div class="winner-item-name">${item.name}</div>
-            <div class="winner-item-meta">${metaParts}</div>
-          </div>
-          <div class="winner-item-time">${item.timestamp}</div>
-        `;
+        const detail = document.createElement('div');
+        const nameEl = document.createElement('div'); nameEl.className = 'winner-item-name'; nameEl.textContent = item.name;
+        const metaEl = document.createElement('div'); metaEl.className = 'winner-item-meta'; metaEl.textContent = metaParts;
+        detail.append(nameEl, metaEl);
+        const right = document.createElement('div');
+        const timeEl = document.createElement('div'); timeEl.className = 'winner-item-time'; timeEl.textContent = item.timestamp;
+        const label = document.createElement('label'); label.className = 'claim-label';
+        const check = document.createElement('input'); check.type = 'checkbox'; check.dataset.recordId = recordKey(item); check.checked = !!state.claims[recordKey(item)];
+        label.append(check, document.createTextNode(' 已領獎'));
+        right.append(timeEl, label); itemEl.append(detail, right);
         listEl.appendChild(itemEl);
       });
 
@@ -516,7 +558,7 @@
       return;
     }
 
-    const headers = ['獎品名稱', '得獎學生姓名', '系所', '年級', '學號', '電子郵件', '中獎時間'];
+    const headers = ['獎品名稱', '得獎學生姓名', '系所', '年級', '學號', '電子郵件', '中獎時間', '領獎狀態'];
     const rows = state.winners.map(w => [
       `"${(w.prizeName || '').replace(/"/g, '""')}"`,
       `"${(w.name || '').replace(/"/g, '""')}"`,
@@ -524,7 +566,8 @@
       `"${(w.grade || '').replace(/"/g, '""')}"`,
       `"${(w.winnerId || '').replace(/"/g, '""')}"`,
       `"${(w.email || '').replace(/"/g, '""')}"`,
-      `"${w.timestamp}"`
+      `"${w.timestamp}"`,
+      state.claims[recordKey(w)] ? "已領取" : "未領取"
     ]);
 
     const csvContent = '\uFEFF' + [headers.join(','), ...rows.map(r => r.join(','))].join('\r\n');
@@ -552,6 +595,8 @@
     if (confirmed) {
       state.winners = [];
       localStorage.removeItem(STORAGE_KEYS.WINNERS);
+      state.claims = {}; localStorage.removeItem(STORAGE_KEYS.CLAIMS);
+      remoteWrite('resetWinners', {});
       dom.winnerCandidateName.textContent = '---';
       dom.winnerCandidateMeta.textContent = '';
       dom.stagePlaceholder.textContent = '準備抽獎';
@@ -562,6 +607,59 @@
       renderWinnersList();
       alert('已成功重置中獎紀錄！');
     }
+  }
+
+  function recordKey(w) { return w.recordId || [w.winnerId, w.prizeId, w.timestamp].join('|'); }
+
+  function renderWeights() {
+    if (!dom.weightsList) return;
+    dom.weightsList.replaceChildren();
+    const unique = new Map();
+    state.participants.forEach(p => { if (!unique.has(p.id)) unique.set(p.id, p); });
+    unique.forEach(p => {
+      const label = document.createElement('label'); label.className = 'weight-row';
+      const name = document.createElement('span'); name.textContent = `${p.name} (${p.id})`;
+      const input = document.createElement('input'); input.type = 'number'; input.min = '0'; input.max = '1000'; input.step = '0.1';
+      input.value = String(state.weights[p.id] ?? 1); input.dataset.participantId = p.id;
+      label.append(name, input); dom.weightsList.append(label);
+    });
+    const oldPrizeFilter = dom.searchPrize.value;
+    dom.searchPrize.replaceChildren(new Option('全部獎項', ''));
+    state.prizes.forEach(prize => dom.searchPrize.add(new Option(prize.name, prize.id)));
+    if (state.prizes.some(p => p.id === oldPrizeFilter)) dom.searchPrize.value = oldPrizeFilter;
+  }
+
+  function saveWeights() {
+    const weights = {};
+    for (const input of dom.weightsList.querySelectorAll('input')) {
+      const n = Number(input.value);
+      if (!Number.isFinite(n) || n < 0 || n > 1000) { alert('權重需介於 0 至 1000'); return; }
+      weights[input.dataset.participantId] = n;
+    }
+    state.weights = weights;
+    localStorage.setItem(STORAGE_KEYS.WEIGHTS, JSON.stringify(weights));
+    remoteWrite('saveWeights', { weights });
+    alert('權重已儲存於本機；如已連接 GAS，將嘗試同步至試算表。');
+  }
+
+  function handleClaimChange(e) {
+    if (!e.target.matches('input[data-record-id]')) return;
+    const key = e.target.dataset.recordId;
+    state.claims[key] = e.target.checked;
+    localStorage.setItem(STORAGE_KEYS.CLAIMS, JSON.stringify(state.claims));
+    remoteWrite('setClaim', { recordId: key, claimed: e.target.checked });
+  }
+
+  async function remoteWrite(action, payload) {
+    if (!state.apiUrl) { dom.syncNote.textContent = '目前為本機模式：資料只保存在此瀏覽器。'; return; }
+    const token = dom.adminToken.value.trim();
+    if (!token) { dom.syncNote.textContent = '未輸入管理權杖，僅儲存本機；正式資料尚未同步。'; return; }
+    try {
+      // GAS ContentService 的跨網域回應可能受 CORS 限制；no-cors 無法確認後端結果。
+      await fetch(state.apiUrl, { method: 'POST', mode: 'no-cors', headers: { 'Content-Type': 'text/plain' },
+        body: JSON.stringify({ action, token, ...payload }) });
+      dom.syncNote.textContent = '已送出同步請求（尚未確認成功）。請重新載入 API 驗證。';
+    } catch (err) { dom.syncNote.textContent = '同步請求失敗：' + err.message; }
   }
 
   // 暴露全域給測試或除錯

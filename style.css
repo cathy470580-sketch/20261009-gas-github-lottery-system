@@ -458,3 +458,13 @@ button {
   font-size: 0.75rem;
   color: rgba(255, 255, 255, 0.4);
 }
+
+/* Issues #1 #8 #11 */
+.lookup-controls { display:flex; flex-wrap:wrap; gap:8px; margin:14px 0; }
+.lookup-controls input,.lookup-controls select { flex:1; min-width:145px; padding:9px; border:1px solid #cbd5e1; border-radius:7px; }
+.management-card { margin:18px 0; padding:20px; }
+.weights-list { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:10px; max-height:250px; overflow:auto; margin:15px 0; }
+.weight-row { display:flex; justify-content:space-between; gap:8px; align-items:center; font-size:13px; }
+.weight-row input { width:70px; padding:6px; border:1px solid #cbd5e1; border-radius:6px; }
+.claim-label { display:block; font-size:12px; margin-top:6px; cursor:pointer; }
+#sync-note { font-size:12px; margin-top:12px; }

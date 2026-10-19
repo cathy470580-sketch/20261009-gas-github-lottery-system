@@ -25,7 +25,10 @@ function doGet(e) {
       status: 'success',
       timestamp: new Date().toISOString(),
       prizes: data.prizes,
-      participants: data.participants
+      participants: data.participants,
+      weights: readKeyValueSheet_('抽獎權重'),
+      claims: readKeyValueSheet_('領獎狀態'),
+      winners: readWinnerRecords_()
     });
   } catch (error) {
     return createJsonResponse({
@@ -214,4 +217,79 @@ function testDoGet() {
   Logger.log('Participants count: ' + result.participants.length);
   Logger.log(JSON.stringify(result, null, 2));
   return result;
+}
+
+
+/** Issues #1 #8 #11: 需要在 Script Properties 設定 ADMIN_TOKEN。 */
+function doPost(e) {
+  try {
+    const request = JSON.parse((e.postData && e.postData.contents) || '{}');
+    const expected = PropertiesService.getScriptProperties().getProperty('ADMIN_TOKEN');
+    if (!expected || request.token !== expected) throw new Error('未授權或尚未設定 ADMIN_TOKEN');
+    const lock = LockService.getScriptLock();
+    lock.waitLock(30000);
+    try {
+      if (request.action === 'saveWeights') {
+        const values = request.weights || {};
+        Object.keys(values).forEach(k => {
+          const n = Number(values[k]);
+          if (!Number.isFinite(n) || n < 0 || n > 1000) throw new Error('權重無效');
+        });
+        replaceKeyValueSheet_('抽獎權重', values);
+      } else if (request.action === 'setClaim') {
+        const id = String(request.recordId || '');
+        if (!id) throw new Error('缺少紀錄 ID');
+        const values = readKeyValueSheet_('領獎狀態');
+        values[id] = request.claimed === true;
+        replaceKeyValueSheet_('領獎狀態', values);
+      } else if (request.action === 'addWinner') {
+        const w = request.winner;
+        if (!w || !w.winnerId || !w.prizeId || !w.recordId) throw new Error('中獎資料不完整');
+        const sheet = ensureSheet_('中獎紀錄', ['recordId','winnerId','name','department','grade','email','prizeId','prizeName','timestamp']);
+        const existing = sheet.getLastRow() > 1 ? sheet.getRange(2,1,sheet.getLastRow()-1,1).getValues().flat() : [];
+        if (!existing.includes(w.recordId)) sheet.appendRow(['recordId','winnerId','name','department','grade','email','prizeId','prizeName','timestamp'].map(k => String(w[k] || '')));
+      } else if (request.action === 'resetWinners') {
+        const sheet = ensureSheet_('中獎紀錄', ['recordId','winnerId','name','department','grade','email','prizeId','prizeName','timestamp']);
+        if (sheet.getLastRow() > 1) sheet.getRange(2,1,sheet.getLastRow()-1,sheet.getLastColumn()).clearContent();
+        replaceKeyValueSheet_('領獎狀態', {});
+      } else throw new Error('不支援的操作');
+    } finally { lock.releaseLock(); }
+    return createJsonResponse({ status: 'success' });
+  } catch (err) { return createJsonResponse({ status: 'error', message: String(err) }); }
+}
+
+function ensureSheet_(name, headers) {
+  const ss = getTargetSpreadsheet();
+  const sheet = ss.getSheetByName(name) || ss.insertSheet(name);
+  if (sheet.getLastRow() === 0) sheet.appendRow(headers);
+  return sheet;
+}
+
+function readKeyValueSheet_(name) {
+  const sheet = getTargetSpreadsheet().getSheetByName(name);
+  const result = {};
+  if (!sheet || sheet.getLastRow() < 2) return result;
+  sheet.getRange(2,1,sheet.getLastRow()-1,2).getValues().forEach(row => {
+    if (row[0] !== '') result[String(row[0])] = row[1];
+  });
+  return result;
+}
+
+function replaceKeyValueSheet_(name, obj) {
+  const sheet = ensureSheet_(name, ['key','value']);
+  if (sheet.getLastRow() > 1) sheet.getRange(2,1,sheet.getLastRow()-1,2).clearContent();
+  const rows = Object.keys(obj).map(k => [k, obj[k]]);
+  if (rows.length) sheet.getRange(2,1,rows.length,2).setValues(rows);
+}
+
+function readWinnerRecords_() {
+  const sheet = getTargetSpreadsheet().getSheetByName('中獎紀錄');
+  if (!sheet || sheet.getLastRow() < 2) return [];
+  const rows = sheet.getDataRange().getValues();
+  const headers = rows.shift();
+  return rows.filter(r => r[0]).map(r => {
+    const w = {};
+    headers.forEach((k,i) => { w[k] = String(r[i] || ''); });
+    return w;
+  });
 }

@@ -91,6 +91,11 @@
             </div>
           </div>
 
+          <div class="lookup-controls">
+            <input id="search-name" type="search" placeholder="依姓名查詢中獎紀錄" aria-label="姓名搜尋">
+            <select id="search-prize" aria-label="依獎項篩選"><option value="">全部獎項</option></select>
+            <button id="clear-search" class="btn-sm btn-outline">清除篩選</button>
+          </div>
           <!-- 中獎記錄分組列表 -->
           <div id="winners-list-container" class="winners-list-container">
             <div class="empty-hint">尚無中獎紀錄</div>
@@ -98,6 +103,14 @@
         </div>
       </section>
     </main>
+    <section class="card management-card">
+      <h2>⚖️ 權重與同步管理</h2>
+      <p>同一身分 ID 的重複報名會保留多次抽獎機會；權重 0 表示不參與抽獎。中獎者不再參與後續抽獎。</p>
+      <div class="lookup-controls"><input id="admin-token" type="password" placeholder="GAS 管理權杖（不會儲存）" autocomplete="off"></div>
+      <div id="weights-list" class="weights-list"></div>
+      <button id="save-weights" class="btn-primary">儲存權重</button>
+      <p id="sync-note" role="status">未連接後端時，所有修改僅保存在本機瀏覽器。</p>
+    </section>
   </div>
 
   <script src="app.js"></script>
